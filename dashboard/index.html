@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Sleep & Snore Guardian</title>
+<!-- MQTT.js: client MQTT di browser lewat WebSocket (wss://) -->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.1/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f5f9; --card: #ffffff; --line: #e1e4ee; --text: #1b2130; --muted: #5d667a;
+    --c1: #3b6fd4; --c2: #d9822b; --c3: #7a4fc2; --threshold: #8a93a6;
+    --ok: #1f7a4d; --ok-bg: #dff1e6; --bad: #b3261e; --bad-bg: #fbe2df;
+    --warn: #8a5a00; --warn-bg: #fbefd2; --info: #245a93; --info-bg: #e3ecf6;
+    --off: #4a5262; --off-bg: #eceef4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1422; --card: #172033; --line: #2a3750; --text: #e8ecf5; --muted: #9fabc2;
+      --c1: #7aa4f2; --c2: #f2a95a; --c3: #b69af0; --threshold: #7d889e;
+      --ok: #7fd3a5; --ok-bg: #173a2a; --bad: #ff9a90; --bad-bg: #4a1f1c;
+      --warn: #f3c86b; --warn-bg: #3d2f12; --info: #9cc3ef; --info-bg: #1b3350;
+      --off: #b8c2d4; --off-bg: #222d44;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; display: grid; gap: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  h1 { font-size: 24px; margin: 0; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .pill { display: inline-block; padding: 4px 12px; border-radius: 999px; font-weight: 600; font-size: 14px; }
+  .ok { color: var(--ok); background: var(--ok-bg); } .bad { color: var(--bad); background: var(--bad-bg); }
+  .warn { color: var(--warn); background: var(--warn-bg); } .info { color: var(--info); background: var(--info-bg); }
+  .off { color: var(--off); background: var(--off-bg); }
+  form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
+  label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+  input { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); width: 100%; }
+  button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--c1); border-color: var(--c1); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  #status-text { font-size: 30px; font-weight: 700; margin: 4px 0; padding: 4px 16px; border-radius: 10px; display: inline-block; }
+  #score { font-size: 56px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); font-size: 14px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 8px 0 0; }
+  dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  .swatch { display: inline-block; width: 14px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  canvas { width: 100%; height: 190px; display: block; }
+  .bar { height: 8px; border-radius: 4px; background: var(--off-bg); overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--c1); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  details summary { cursor: pointer; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>😴 Smart Sleep &amp; Snore Guardian</h1>
+    <span id="conn" class="pill off" role="status">Belum terhubung</span>
+  </header>
+
+  <details class="card" id="settings" open>
+    <summary>Koneksi broker (MQTT over WebSocket)</summary>
+    <p class="muted">Browser tidak bisa memakai MQTT TCP port 8883, jadi dashboard memakai <b>WebSocket over TLS</b>
+      (HiveMQ publik: <code>wss://broker.hivemq.com:8884/mqtt</code>, username/password kosong). Password tidak disimpan.</p>
+    <form id="conn-form">
+      <label>WebSocket URL <input id="url" value="wss://broker.hivemq.com:8884/mqtt" required></label>
+      <label>PROJECT_ID (sama dengan .env) <input id="project" placeholder="sleepguard_kelompok_07" required></label>
+      <label>Username <input id="username" autocomplete="username"></label>
+      <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+      <div class="row">
+        <button class="primary" type="submit">Hubungkan</button>
+        <button id="disconnect-btn" type="button" disabled>Putuskan</button>
+      </div>
+    </form>
+  </details>
+
+  <div class="grid">
+    <section class="card" aria-labelledby="h-status">
+      <h2 id="h-status">Status tidur</h2>
+      <div id="status-text" class="off">—</div>
+      <p id="status-reason" class="muted">Menunggu pesan dari topic status…</p>
+      <div class="row">
+        <span id="monitoring" class="pill off">Pantau: ?</span>
+        <button id="start-btn" type="button" disabled>▶ Mulai</button>
+        <button id="pause-btn" type="button" disabled>⏸ Jeda</button>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="h-score">
+      <h2 id="h-score">Skor kualitas tidur</h2>
+      <div id="score">—</div>
+      <p class="muted" id="score-detail">0–100, dihitung dari 5 jendela terakhir.</p>
+    </section>
+    <section class="card" aria-labelledby="h-edge1">
+      <h2 id="h-edge1">Edge 1 · HP kasur</h2>
+      <span id="edge1-state" class="pill off">Belum ada data</span>
+      <dl>
+        <dt>Gerak (RMS)</dt><dd id="e1-motion">—</dd>
+        <dt>Puncak dengkur</dt><dd id="e1-peaks">—</dd>
+        <dt>Level dengkur</dt><dd id="e1-level">—</dd>
+        <dt>Terakhir</dt><dd id="edge1-seen">—</dd>
+      </dl>
+    </section>
+    <section class="card" aria-labelledby="h-edge2">
+      <h2 id="h-edge2">Edge 2 · HP meja</h2>
+      <span id="edge2-state" class="pill off">Belum ada data</span>
+      <dl>
+        <dt>Cahaya</dt><dd id="e2-lux">—</dd>
+        <dt>Suara ruangan</dt><dd id="e2-level">—</dd>
+        <dt>Puncak suara</dt><dd id="e2-peak">—</dd>
+        <dt>Terakhir</dt><dd id="edge2-seen">—</dd>
+      </dl>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="card"><h2>Skor kualitas tidur (live)</h2>
+      <canvas id="ch-score" role="img" aria-label="Grafik skor kualitas tidur"></canvas></section>
+    <section class="card"><h2>Gerak kasur (motion RMS, m/s²)</h2>
+      <div class="legend"><span><span class="swatch" style="background:var(--c1)"></span>Edge 1</span>
+        <span><span class="swatch" style="background:var(--threshold)"></span>Ambang gelisah</span></div>
+      <canvas id="ch-motion" role="img" aria-label="Grafik gerak kasur"></canvas></section>
+    <section class="card"><h2>Suara (amplitudo 0–1)</h2>
+      <div class="legend"><span><span class="swatch" style="background:var(--c2)"></span>Dengkur (bantal)</span>
+        <span><span class="swatch" style="background:var(--c3)"></span>Puncak di meja</span>
+        <span><span class="swatch" style="background:var(--threshold)"></span>Ambang dengkur</span></div>
+      <canvas id="ch-sound" role="img" aria-label="Grafik suara"></canvas></section>
+    <section class="card"><h2>Cahaya kamar (lux)</h2>
+      <div class="legend"><span><span class="swatch" style="background:var(--c1)"></span>Edge 2</span>
+        <span><span class="swatch" style="background:var(--threshold)"></span>Batas terang</span></div>
+      <canvas id="ch-light" role="img" aria-label="Grafik cahaya"></canvas></section>
+  </div>
+
+  <div class="grid">
+    <section class="card" aria-labelledby="h-sum">
+      <h2 id="h-sum">Ringkasan sesi</h2>
+      <p class="muted" id="sum-head">Belum ada data.</p>
+      <div id="sum-bars" style="display:grid;gap:8px"></div>
+    </section>
+    <section class="card" aria-labelledby="h-alerts">
+      <h2 id="h-alerts">Riwayat alert</h2>
+      <table>
+        <thead><tr><th>Waktu</th><th>Level</th><th>Ke</th><th>Skor</th></tr></thead>
+        <tbody id="alerts"><tr><td colspan="4" class="muted">Belum ada alert.</td></tr></tbody>
+      </table>
+    </section>
+  </div>
+
+  <p class="muted" id="topics"></p>
+  <p class="muted">Indikasi dari sensor HP, bukan diagnosis medis. Audio tidak direkam/dikirim; hanya angka level suara.</p>
+</main>
+
+<script>
+"use strict";
+// Samakan dengan nodes/detector_service/rules.py dan .env (MOTION_THRESHOLD, SNORE_LEVEL_MIN, BRIGHT_LUX)
+const MOTION_THRESHOLD = 0.2, SNORE_LEVEL_MIN = 0.03, BRIGHT_LUX = 30;
+const OFFLINE_AFTER_MS = 20000, MAX_POINTS = 60;
+const LABEL = {
+  DEEP_SLEEP: "Tidur Nyenyak", RESTLESS: "Gelisah", HEAVY_SNORING: "Mendengkur Keras",
+  POOR_SLEEP_ALERT: "Tidur Buruk!", ENV_NOISE: "Bising Lingkungan", WAITING: "Menunggu",
+  ONLINE: "Detector Online", MONITORING: "Pantau Aktif", PAUSED: "Dijeda", OFFLINE: "Offline",
+  REFERENCE_OLD: "Data Beda Waktu", REJECTED_REPLAY: "Ditolak (replay)", REJECTED_STALE: "Ditolak (basi)",
+};
+const CLASS = {
+  DEEP_SLEEP: "ok", RESTLESS: "warn", HEAVY_SNORING: "warn", POOR_SLEEP_ALERT: "bad", ENV_NOISE: "info",
+  WAITING: "info", ONLINE: "info", MONITORING: "ok", PAUSED: "off", OFFLINE: "off",
+  REFERENCE_OLD: "warn", REJECTED_REPLAY: "warn", REJECTED_STALE: "warn",
+};
+const SLEEP_STATES = ["DEEP_SLEEP", "RESTLESS", "HEAVY_SNORING", "POOR_SLEEP_ALERT", "ENV_NOISE"];
+
+const $ = (id) => document.getElementById(id);
+let client = null, base = "", lastStatusAt = 0;
+const seen = { edge1: 0, edge2: 0 };
+const S = { score: [], motion: [], snore: [], peak: [], lux: [] };
+const tally = Object.fromEntries(SLEEP_STATES.map((s) => [s, 0]));
+let scoreSum = 0, windows = 0;
+const alerts = [];
+
+const fmt = (n, d = 3) => (typeof n === "number" && isFinite(n) ? n.toFixed(d) : "—");
+const clock = (ms) => new Date(ms).toLocaleTimeString("id-ID");
+function setPill(el, text, cls) { el.textContent = text; el.className = el.className.replace(/\b(ok|bad|warn|info|off)\b/g, "").trim() + " " + cls; }
+function push(arr, v) { arr.push(v); if (arr.length > MAX_POINTS) arr.shift(); }
+
+// ---------- pengaturan tersimpan (tanpa password) ----------
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("sleepguard-dashboard") || "{}");
+    for (const k of ["url", "project", "username"]) if (saved[k]) $(k).value = saved[k];
+  } catch (e) { /* abaikan */ }
+}
+function saveSettings() {
+  try { localStorage.setItem("sleepguard-dashboard", JSON.stringify({ url: $("url").value.trim(), project: $("project").value.trim(), username: $("username").value.trim() })); } catch (e) { /* abaikan */ }
+}
+
+// ---------- MQTT ----------
+function connect(event) {
+  event.preventDefault();
+  const url = $("url").value.trim(), project = $("project").value.trim();
+  if (!/^wss?:\/\//.test(url)) return setPill($("conn"), "URL harus diawali wss://", "bad");
+  if (!/^[A-Za-z0-9_-]+$/.test(project)) return setPill($("conn"), "PROJECT_ID tidak valid", "bad");
+  if (typeof mqtt === "undefined") return setPill($("conn"), "MQTT.js gagal dimuat (cek internet)", "bad");
+  saveSettings();
+  if (client) client.end(true);
+  base = `sleepguard/${project}`;
+  $("topics").textContent = `Subscribe: ${base}/edge/+/telemetry · ${base}/status · ${base}/alerts — Publish: ${base}/control`;
+  setPill($("conn"), "Menghubungkan…", "info");
+  client = mqtt.connect(url, {
+    username: $("username").value.trim() || undefined, password: $("password").value || undefined,
+    clientId: `${project}-dashboard-${Math.random().toString(16).slice(2, 10)}`,
+    protocolVersion: 4, reconnectPeriod: 3000, connectTimeout: 10000,
+  });
+  client.on("connect", () => {
+    setPill($("conn"), "Terhubung", "ok");
+    client.subscribe([`${base}/edge/+/telemetry`, `${base}/status`, `${base}/alerts`], { qos: 1 });
+    $("settings").open = false; setButtons(true);
+  });
+  client.on("reconnect", () => setPill($("conn"), "Menyambung ulang…", "warn"));
+  client.on("offline", () => { setPill($("conn"), "Terputus", "off"); setButtons(false); });
+  client.on("error", (err) => setPill($("conn"), `Error: ${err.message}`, "bad"));
+  client.on("message", onMessage);
+}
+function disconnect() {
+  if (client) client.end(true);
+  client = null; setPill($("conn"), "Belum terhubung", "off"); setButtons(false); $("settings").open = true;
+}
+function setButtons(on) { for (const id of ["disconnect-btn", "start-btn", "pause-btn"]) $(id).disabled = !on; }
+function sendControl(cmd) { if (client && client.connected) client.publish(`${base}/control`, cmd, { qos: 1 }); }
+
+function onMessage(topic, payload) {
+  let d;
+  try { d = JSON.parse(payload.toString()); } catch (e) { return; }
+  if (!d || typeof d !== "object") return;
+  if (topic === `${base}/status`) return renderStatus(d);
+  if (topic === `${base}/alerts`) return addAlert(d);
+  const m = topic.match(/\/edge\/(edge1|edge2)\/telemetry$/);
+  if (m && d.device_id === m[1]) updateEdge(m[1], d);
+}
+
+// ---------- tampilan ----------
+function renderStatus(d) {
+  const status = String(d.status || "?");
+  const el = $("status-text");
+  el.textContent = LABEL[status] || status; el.className = CLASS[status] || "info";
+  $("status-reason").textContent = String(d.reason || "") + (typeof d.at_ms === "number" ? ` (${clock(d.at_ms)})` : "");
+  setPill($("monitoring"), d.monitoring ? "Pantau: aktif" : "Pantau: jeda", d.monitoring ? "ok" : "off");
+  if (!SLEEP_STATES.includes(status) || typeof d.sleep_score !== "number") return;
+  $("score").textContent = Math.round(d.sleep_score);
+  const c = d.counts || {};
+  $("score-detail").textContent = `Dari ${c.windows ?? 0} jendela: gelisah ${c.restless ?? 0}, dengkur ${c.snoring ?? 0}, terang ${c.bright ?? 0}.`;
+  if (d.at_ms === lastStatusAt) return;      // status retained: jangan hitung ganda
+  lastStatusAt = d.at_ms;
+  push(S.score, d.sleep_score); tally[status]++; scoreSum += d.sleep_score; windows++;
+  drawAll(); renderSummary();
+}
+function updateEdge(id, d) {
+  seen[id] = Date.now();
+  if (id === "edge1") {
+    $("e1-motion").textContent = `${fmt(d.motion_rms)} m/s²`;
+    $("e1-peaks").textContent = String(d.snore_peaks ?? "—");
+    $("e1-level").textContent = fmt(d.snore_level);
+    push(S.motion, d.motion_rms); push(S.snore, d.snore_level);
+    const restless = d.motion_rms >= MOTION_THRESHOLD, snoring = d.snore_peaks >= 1 && d.snore_level >= SNORE_LEVEL_MIN;
+    setPill($("edge1-state"), snoring ? "Ada dengkuran" : restless ? "Bergerak" : "Tenang", snoring || restless ? "warn" : "ok");
+  } else {
+    $("e2-lux").textContent = `${fmt(d.light_lux, 1)} lux`;
+    $("e2-level").textContent = fmt(d.ambient_level);
+    $("e2-peak").textContent = fmt(d.ambient_peak);
+    push(S.lux, d.light_lux); push(S.peak, d.ambient_peak);
+    setPill($("edge2-state"), d.light_lux >= BRIGHT_LUX ? "Kamar terang" : "Kamar gelap", d.light_lux >= BRIGHT_LUX ? "warn" : "ok");
+  }
+  drawAll();
+}
+function addAlert(d) {
+  alerts.unshift({ at: Date.now(), level: String(d.level || "?"), target: String(d.target || "?"), score: d.sleep_score });
+  alerts.length = Math.min(alerts.length, 20);
+  $("alerts").replaceChildren(...alerts.map((a) => {
+    const tr = document.createElement("tr");
+    for (const t of [clock(a.at), LABEL[a.level] || a.level, a.target, fmt(Number(a.score), 0)]) {
+      const td = document.createElement("td"); td.textContent = t; tr.appendChild(td);
+    }
+    return tr;
+  }));
+}
+function renderSummary() {
+  if (!windows) return;
+  $("sum-head").textContent = `${windows} jendela dinilai · rata-rata skor ${(scoreSum / windows).toFixed(1)} · ${alerts.length} alert`;
+  $("sum-bars").replaceChildren(...SLEEP_STATES.map((s) => {
+    const pct = windows ? (100 * tally[s]) / windows : 0;
+    const wrap = document.createElement("div");
+    const label = document.createElement("div"); label.className = "muted";
+    label.textContent = `${LABEL[s]} — ${pct.toFixed(0)}%`;
+    const bar = document.createElement("div"); bar.className = "bar";
+    const fill = document.createElement("span"); fill.style.width = `${pct}%`;
+    bar.appendChild(fill); wrap.append(label, bar); return wrap;
+  }));
+}
+function tick() {
+  for (const id of ["edge1", "edge2"]) {
+    if (!seen[id]) continue;
+    const age = Date.now() - seen[id];
+    $(`${id}-seen`).textContent = `${Math.round(age / 1000)} detik lalu`;
+    if (age > OFFLINE_AFTER_MS) setPill($(`${id}-state`), "Offline (tidak ada data)", "off");
+  }
+}
+
+// ---------- grafik (canvas, tanpa library) ----------
+function drawChart(id, lines, { min = 0, max, threshold, floorMax = 1, digits = 1 }) {
+  const canvas = $(id), ratio = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * ratio; canvas.height = h * ratio;
+  const ctx = canvas.getContext("2d"); ctx.scale(ratio, ratio);
+  const css = getComputedStyle(document.documentElement), color = (n) => css.getPropertyValue(n).trim();
+  const pad = { l: 44, r: 8, t: 8, b: 8 };
+  const all = lines.flatMap((l) => l.data).concat(threshold ?? 0);
+  const top = max ?? Math.max(floorMax, Math.max(...all) * 1.15);
+  const x = (i) => pad.l + (i / (MAX_POINTS - 1)) * (w - pad.l - pad.r);
+  const y = (v) => pad.t + (1 - (v - min) / (top - min)) * (h - pad.t - pad.b);
+  ctx.font = "12px system-ui, sans-serif"; ctx.fillStyle = color("--muted"); ctx.strokeStyle = color("--line"); ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = min + ((top - min) / 4) * i;
+    ctx.beginPath(); ctx.moveTo(pad.l, y(v)); ctx.lineTo(w - pad.r, y(v)); ctx.stroke();
+    ctx.fillText(v.toFixed(digits), 4, y(v) + 4);
+  }
+  if (threshold != null) {
+    ctx.setLineDash([6, 4]); ctx.strokeStyle = color("--threshold");
+    ctx.beginPath(); ctx.moveTo(pad.l, y(threshold)); ctx.lineTo(w - pad.r, y(threshold)); ctx.stroke(); ctx.setLineDash([]);
+  }
+  for (const l of lines) {
+    if (!l.data.length) continue;
+    const off = MAX_POINTS - l.data.length;
+    ctx.strokeStyle = color(l.color); ctx.lineWidth = 2.5; ctx.beginPath();
+    l.data.forEach((v, i) => (i ? ctx.lineTo(x(off + i), y(v)) : ctx.moveTo(x(off + i), y(v))));
+    ctx.stroke();
+  }
+}
+function drawAll() {
+  drawChart("ch-score", [{ data: S.score, color: "--c1" }], { max: 100, digits: 0 });
+  drawChart("ch-motion", [{ data: S.motion, color: "--c1" }], { threshold: MOTION_THRESHOLD, floorMax: 0.5, digits: 2 });
+  drawChart("ch-sound", [{ data: S.snore, color: "--c2" }, { data: S.peak, color: "--c3" }], { threshold: SNORE_LEVEL_MIN, floorMax: 0.1, digits: 2 });
+  drawChart("ch-light", [{ data: S.lux, color: "--c1" }], { threshold: BRIGHT_LUX, floorMax: 50, digits: 0 });
+}
+
+$("conn-form").addEventListener("submit", connect);
+$("disconnect-btn").addEventListener("click", disconnect);
+$("start-btn").addEventListener("click", () => sendControl("START"));
+$("pause-btn").addEventListener("click", () => sendControl("PAUSE"));
+window.addEventListener("resize", drawAll);
+loadSettings();
+
+// Dibuka lewat "python detector.py": server lokal hanya memberi konfigurasi PUBLIK.
+async function applyLocalConfig() {
+  try {
+    const r = await fetch("/config.json", { cache: "no-store" });
+    if (!r.ok) return;
+    const c = await r.json();
+    if (!/^[A-Za-z0-9_-]+$/.test(c.project_id || "")) return;
+    $("project").value = c.project_id;
+    if (c.websocket_url) $("url").value = c.websocket_url;
+    $("username").value = ""; $("password").value = "";
+    if (c.automatic_connection) $("conn-form").requestSubmit();
+    else { $("settings").open = true; setPill($("conn"), "Atur kredensial browser MQTT", "info"); }
+  } catch (_) { /* dibuka sebagai file statis: form manual tetap jalan */ }
+}
+applyLocalConfig(); drawAll(); renderSummary(); setInterval(tick, 1000);
+</script>
+</body>
+</html>
